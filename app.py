@@ -257,7 +257,8 @@ def color_map(teams):
 
 def style_fig(fig, height=None):
     fig.update_layout(
-        margin=dict(l=10, r=10, t=40, b=10),
+        margin=dict(l=10, r=10, t=90, b=10),
+        title=dict(yref="container", y=0.98, yanchor="top", x=0, xanchor="left", pad=dict(l=10)),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0, title=None),
         font=dict(size=13),
     )
