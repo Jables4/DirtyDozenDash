@@ -161,7 +161,8 @@ def season_weeks(league, state):
     return regular, regular, None
 
 
-def optimal_points(players_points, slots, players):
+def optimal_lineup(players_points, slots, players):
+    """Best possible lineup: returns (points, set of player ids)."""
     pool = sorted(players_points.items(), key=lambda kv: -(kv[1] or 0))
     used, total = set(), 0.0
     for slot in sorted(slots, key=lambda s: len(SLOT_ELIGIBILITY.get(s, {s}))):
@@ -173,7 +174,11 @@ def optimal_points(players_points, slots, players):
                 used.add(pid)
                 total += pts or 0
                 break
-    return total
+    return total, used
+
+
+def optimal_points(players_points, slots, players):
+    return optimal_lineup(players_points, slots, players)[0]
 
 
 def build_weekly(data, weeks, players, labels):
@@ -329,13 +334,130 @@ if median_league:
     subtitle += " Records include the weekly median game."
 st.caption(subtitle)
 
-tabs = st.tabs(["Standings & luck", "Weekly scores", "Managers", "Power rankings",
+tabs = st.tabs(["Weekly awards", "Standings & luck", "Weekly scores", "Managers", "Power rankings",
                 "Trades & waivers", "Draft", "Playoff odds", "History"])
+
+# ---------------------------------------------------------------------------
+# Weekly awards
+# ---------------------------------------------------------------------------
+def lineup_swaps(m, slots):
+    """Players who should have started vs. the starters they'd have replaced."""
+    pp = m.get("players_points") or {}
+    _, best = optimal_lineup(pp, slots, players)
+    started = {p for p in (m.get("starters") or []) if p and p != "0"}
+    should_start = sorted(best - started, key=lambda p: -(pp.get(p) or 0))
+    should_sit = sorted(started - best, key=lambda p: pp.get(p) or 0)
+    return [(players.get(a, {}).get("name", a), pp.get(a) or 0, players.get(b, {}).get("name", b), pp.get(b) or 0)
+            for a, b in zip(should_start, should_sit)]
+
+
+def week_awards(wk):
+    wd = all_weekly[all_weekly["week"] == wk].copy()
+    raw = {m["roster_id"]: m for m in data["matchups"].get(wk) or []}
+    slots = [s for s in league.get("roster_positions", []) if s not in NON_STARTER_SLOTS]
+    wd["bench"] = wd["optimal"] - wd["points"]
+    a = {}
+    top, low = wd.loc[wd["points"].idxmax()], wd.loc[wd["points"].idxmin()]
+    a["top"] = (top["team"], f"{top['points']:.1f} points")
+    a["low"] = (low["team"], f"{low['points']:.1f} points")
+
+    winners, losers = wd[wd["result"] == "W"], wd[wd["result"] == "L"]
+    if not winners.empty:
+        w = winners.loc[winners["points"].idxmin()]
+        above = int((wd["points"] > w["points"]).sum())
+        a["lucky"] = (w["team"], f"Beat {w['opponent']} with {w['points']:.1f}, "
+                                 f"even though {above} team{'s' if above != 1 else ''} scored more")
+    if not losers.empty:
+        l = losers.loc[losers["points"].idxmax()]
+        below = int((wd["points"] < l["points"]).sum())
+        a["tough"] = (l["team"], f"Lost to {l['opponent']} with {l['points']:.1f}, "
+                                 f"which would have beaten {below} other team{'s' if below != 1 else ''}")
+
+    b = wd.loc[wd["bench"].idxmax()]
+    detail = f"Left {b['bench']:.1f} points on the bench"
+    swaps = lineup_swaps(raw.get(b["roster_id"], {}), slots)
+    if swaps:
+        good, gp, bad, bp = swaps[0]
+        detail += f". Started {bad} ({bp:.1f}) over {good} ({gp:.1f})"
+    a["blunder"] = (b["team"], detail)
+
+    perfect = wd[wd["bench"] < 0.05]["team"].tolist()
+    if perfect:
+        a["coach"] = (", ".join(perfect), "Started the best possible lineup")
+    else:
+        c = wd.loc[(wd["points"] / wd["optimal"]).idxmax()]
+        a["coach"] = (c["team"], f"Started {c['points'] / c['optimal']:.1%} of their best possible lineup")
+
+    st_wk = all_starters[all_starters["week"] == wk] if not all_starters.empty else all_starters
+    if not st_wk.empty:
+        p = st_wk.loc[st_wk["points"].idxmax()]
+        a["player"] = (p["player"], f"{p['points']:.1f} points for {p['team']}")
+    bench_rows = []
+    for rid, m in raw.items():
+        started = set(m.get("starters") or [])
+        for pid, pts in (m.get("players_points") or {}).items():
+            if pid not in started:
+                bench_rows.append((pts or 0, pid, rid))
+    if bench_rows:
+        pts, pid, rid = max(bench_rows)
+        if pts > 0:
+            a["benchmvp"] = (players.get(pid, {}).get("name", pid), f"{pts:.1f} points on {labels.get(rid, rid)}'s bench")
+
+    games = wd.dropna(subset=["opp_points"])
+    games = games[games["points"] > games["opp_points"]]
+    if not games.empty:
+        margin = games["points"] - games["opp_points"]
+        g = games.loc[margin.idxmax()]
+        a["blowout"] = (g["team"], f"Beat {g['opponent']} by {g['points'] - g['opp_points']:.1f}")
+        g = games.loc[margin.idxmin()]
+        a["close"] = (g["team"], f"Beat {g['opponent']} by {g['points'] - g['opp_points']:.2f}")
+    return a
+
+
+AWARDS = [
+    ("top", "🔥", "Top score"), ("low", "🧊", "Lowest score"),
+    ("lucky", "🍀", "Luckiest win"), ("tough", "💔", "Toughest loss"),
+    ("blunder", "🪑", "Bench blunder"), ("coach", "📋", "Coach of the week"),
+    ("player", "⭐", "Player of the week"), ("benchmvp", "😭", "Bench MVP"),
+    ("blowout", "💥", "Blowout"), ("close", "😬", "Nail-biter"),
+]
+
+with tabs[0]:
+    award_wk = st.selectbox("Week", finished_weeks[::-1], format_func=lambda w: f"Week {w}")
+    aw = week_awards(award_wk)
+    shown = [x for x in AWARDS if x[0] in aw]
+    for row in range(0, len(shown), 3):
+        cols = st.columns(3)
+        for col, (key, emoji, title) in zip(cols, shown[row:row + 3]):
+            who, what = aw[key]
+            with col.container(border=True):
+                st.markdown(f"{emoji} **{title}**")
+                st.markdown(f"### {who}")
+                st.caption(what)
+
+    recap = [f"🏈 {league.get('name') or 'League'}: week {award_wk} awards", ""]
+    recap += [f"{emoji} {title}: {aw[key][0]}, {aw[key][1][0].lower()}{aw[key][1][1:]}" for key, emoji, title in shown]
+    st.markdown("**Copy for the group chat**")
+    st.code("\n".join(recap), language=None, wrap_lines=True)
+
+    tally_keys = [("top", "🔥 Top score"), ("low", "🧊 Lowest"), ("lucky", "🍀 Lucky win"),
+                  ("tough", "💔 Tough loss"), ("blunder", "🪑 Blunder"), ("coach", "📋 Coach")]
+    tally = pd.DataFrame(0, index=sorted(labels.values()), columns=[c for _, c in tally_keys])
+    for wk in finished_weeks:
+        wa = week_awards(wk)
+        for key, colname in tally_keys:
+            if key in wa:
+                for team in wa[key][0].split(", "):
+                    if team in tally.index:
+                        tally.loc[team, colname] += 1
+    tally = tally.sort_values(list(tally.columns), ascending=False)
+    st.markdown("**Season trophy case**")
+    st.dataframe(tally, width="stretch")
 
 # ---------------------------------------------------------------------------
 # Standings & luck
 # ---------------------------------------------------------------------------
-with tabs[0]:
+with tabs[1]:
     show = table[["Team", "W", "L", "T", "PF", "PA", "All-play W", "All-play L", "Expected W", "Luck"]].copy()
     if not show["T"].any():
         show = show.drop(columns="T")
@@ -379,7 +501,7 @@ with tabs[0]:
 # ---------------------------------------------------------------------------
 # Weekly scores
 # ---------------------------------------------------------------------------
-with tabs[1]:
+with tabs[2]:
     games = weekly.dropna(subset=["opp_points"]).copy()
     games = games[games["roster_id"] < games["opp_id"]]
     games["margin"] = (games["points"] - games["opp_points"]).abs()
@@ -424,7 +546,7 @@ with tabs[1]:
 # ---------------------------------------------------------------------------
 # Managers
 # ---------------------------------------------------------------------------
-with tabs[2]:
+with tabs[3]:
     c1, c2 = st.columns(2)
     with c1:
         eff = table.sort_values("Efficiency")
@@ -471,7 +593,7 @@ with tabs[2]:
 # ---------------------------------------------------------------------------
 # Power rankings
 # ---------------------------------------------------------------------------
-with tabs[3]:
+with tabs[4]:
     st.caption("Score = 40% all-play win rate + 30% season scoring average + 30% last-3-week average, "
                "each scaled across the league.")
     hist = []
@@ -503,16 +625,31 @@ with tabs[3]:
                      hide_index=True, width="stretch",
                      column_config={"Score": st.column_config.ProgressColumn(min_value=0, max_value=1, format="%.2f")})
     with c2:
-        fig = px.line(ph, x="week", y="rank", color="team", markers=True, color_discrete_map=cmap)
-        fig.update_yaxes(autorange="reversed", dtick=1, title="Rank")
+        all_teams = pr["team"].tolist()
+        highlight = st.multiselect("Highlight teams", all_teams, default=all_teams[:3])
+        fig = go.Figure()
+        # gray teams first so highlighted lines draw on top
+        for team in sorted(all_teams, key=lambda t: t in highlight):
+            t = ph[ph["team"] == team].sort_values("week")
+            on = team in highlight
+            color = cmap[team] if on else "rgba(150,150,150,0.3)"
+            fig.add_scatter(x=t["week"], y=t["rank"], mode="lines+markers" if on else "lines",
+                            line=dict(color=color, width=3.5 if on else 1.5), marker=dict(size=8),
+                            showlegend=False, hovertemplate=f"{team}<br>Week %{{x}}: #%{{y}}<extra></extra>")
+            last = t.iloc[-1]
+            fig.add_annotation(x=last["week"], y=last["rank"], text=f"{int(last['rank'])}. {team}",
+                               xanchor="left", xshift=10, showarrow=False,
+                               font=dict(size=12, color=cmap[team] if on else "rgba(150,150,150,0.9)"))
+        fig.update_yaxes(autorange="reversed", dtick=1, title="Rank", showgrid=False)
         fig.update_xaxes(dtick=1, title="Week")
-        fig.update_layout(title="Power rank over the season (click names to hide/show)")
-        st.plotly_chart(style_fig(fig, 480), width="stretch")
+        fig.update_layout(title="Power rank over the season")
+        style_fig(fig, 480).update_layout(margin=dict(r=200))
+        st.plotly_chart(fig, width="stretch")
 
 # ---------------------------------------------------------------------------
 # Trades & waivers
 # ---------------------------------------------------------------------------
-with tabs[4]:
+with tabs[5]:
     txns = [t for t in data["transactions"] if t.get("status") == "complete"]
     started = (all_starters[all_starters["week"].isin(finished_weeks)]
                if not all_starters.empty else all_starters)
@@ -593,7 +730,7 @@ with tabs[4]:
 # ---------------------------------------------------------------------------
 # Draft
 # ---------------------------------------------------------------------------
-with tabs[5]:
+with tabs[6]:
     picks = data["picks"]
     if not picks:
         st.write("No draft found for this season.")
@@ -651,7 +788,7 @@ with tabs[5]:
 # ---------------------------------------------------------------------------
 # Playoff odds
 # ---------------------------------------------------------------------------
-with tabs[6]:
+with tabs[7]:
     remaining = [w for w in regular_weeks if w not in finished_weeks]
     playoff_teams = int(settings.get("playoff_teams") or 6)
     if not remaining:
@@ -723,7 +860,7 @@ with tabs[6]:
 # ---------------------------------------------------------------------------
 # History
 # ---------------------------------------------------------------------------
-with tabs[7]:
+with tabs[8]:
     st.caption("Head-to-head records count regular-season games across every season of this league on Sleeper.")
     names, h2h, alltime, titles = {}, defaultdict(lambda: [0, 0, 0]), defaultdict(lambda: [0, 0, 0, 0.0]), defaultdict(int)
     for i, c in enumerate(chain):
