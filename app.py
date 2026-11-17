@@ -809,12 +809,18 @@ with tabs[6]:
                     b1, b2 = st.columns(2)
                     with b1:
                         st.markdown("Best values")
-                        st.dataframe(sub.sort_values("Value", ascending=False).head(8)[cols],
-                                     hide_index=True, width="stretch", column_config=value_fmt)
+                        good = sub[sub["Value"] > 0].sort_values("Value", ascending=False).head(8)
+                        if good.empty:
+                            st.caption("No one beat expectations here yet.")
+                        else:
+                            st.dataframe(good[cols], hide_index=True, width="stretch", column_config=value_fmt)
                     with b2:
                         st.markdown("Biggest busts")
-                        st.dataframe(sub.sort_values("Value").head(8)[cols],
-                                     hide_index=True, width="stretch", column_config=value_fmt)
+                        bad = sub[sub["Value"] < 0].sort_values("Value").head(8)
+                        if bad.empty:
+                            st.caption("No one fell short of expectations here yet.")
+                        else:
+                            st.dataframe(bad[cols], hide_index=True, width="stretch", column_config=value_fmt)
 
 # ---------------------------------------------------------------------------
 # Playoff odds
