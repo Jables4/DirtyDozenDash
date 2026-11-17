@@ -340,15 +340,21 @@ tabs = st.tabs(["Weekly awards", "Standings & luck", "Weekly scores", "Managers"
 # ---------------------------------------------------------------------------
 # Weekly awards
 # ---------------------------------------------------------------------------
-def lineup_swaps(m, slots):
-    """Players who should have started vs. the starters they'd have replaced."""
+def worst_swap(m):
+    """Biggest same-position mistake: a benched player who outscored a starter at his position."""
     pp = m.get("players_points") or {}
-    _, best = optimal_lineup(pp, slots, players)
-    started = {p for p in (m.get("starters") or []) if p and p != "0"}
-    should_start = sorted(best - started, key=lambda p: -(pp.get(p) or 0))
-    should_sit = sorted(started - best, key=lambda p: pp.get(p) or 0)
-    return [(players.get(a, {}).get("name", a), pp.get(a) or 0, players.get(b, {}).get("name", b), pp.get(b) or 0)
-            for a, b in zip(should_start, should_sit)]
+    started = [p for p in (m.get("starters") or []) if p and p != "0"]
+    benched = [p for p in pp if p not in set(started)]
+    best = None
+    for s in started:
+        pos = players.get(s, {}).get("pos")
+        for b in benched:
+            if players.get(b, {}).get("pos") == pos:
+                gain = (pp.get(b) or 0) - (pp.get(s) or 0)
+                if gain > 0 and (best is None or gain > best[0]):
+                    best = (gain, players.get(b, {}).get("name", b), pp.get(b) or 0,
+                            players.get(s, {}).get("name", s), pp.get(s) or 0, pos)
+    return best
 
 
 def week_awards(wk):
@@ -373,13 +379,17 @@ def week_awards(wk):
         a["tough"] = (l["team"], f"Lost to {l['opponent']} with {l['points']:.1f}, "
                                  f"which would have beaten {below} other team{'s' if below != 1 else ''}")
 
-    b = wd.loc[wd["bench"].idxmax()]
-    detail = f"Left {b['bench']:.1f} points on the bench"
-    swaps = lineup_swaps(raw.get(b["roster_id"], {}), slots)
-    if swaps:
-        good, gp, bad, bp = swaps[0]
-        detail += f". Started {bad} ({bp:.1f}) over {good} ({gp:.1f})"
-    a["blunder"] = (b["team"], detail)
+    blunders = []
+    for _, r in wd.iterrows():
+        sw = worst_swap(raw.get(r["roster_id"], {}))
+        if sw:
+            blunders.append((sw, r))
+    if blunders:
+        (gain, good, gp, bad, bp, pos), r = max(blunders, key=lambda x: x[0][0])
+        detail = f"Started {bad} ({bp:.1f}) over {good} ({gp:.1f}) at {pos}, a {gain:.1f}-point mistake"
+        if r["result"] == "L" and r["opp_points"] - r["points"] < gain:
+            detail += f". That swap would have beaten {r['opponent']}"
+        a["blunder"] = (r["team"], detail)
 
     perfect = wd[wd["bench"] < 0.05]["team"].tolist()
     if perfect:
@@ -752,38 +762,59 @@ with tabs[6]:
                 "Points": season_pts.get(pid, 0.0),
             })
         ddf = pd.DataFrame(rows).sort_values("Pick")
-        if len(ddf) > 3:
-            coef = np.polyfit(np.log(ddf["Pick"]), ddf["Points"], 1)
-            ddf["Expected"] = np.polyval(coef, np.log(ddf["Pick"])).clip(min=0)
-        else:
-            ddf["Expected"] = ddf["Points"].mean()
+        # expected points depend on position: a 14th-round QB is compared with other QBs, not with RBs
+        def fit_expected(g):
+            if len(g) >= 4 and g["Pick"].nunique() > 1:
+                coef = np.polyfit(np.log(g["Pick"]), g["Points"], 1)
+                return pd.Series(np.polyval(coef, np.log(g["Pick"])).clip(min=0), index=g.index)
+            return pd.Series(g["Points"].mean(), index=g.index)
+
+        ddf["Expected"] = pd.concat([fit_expected(g) for _, g in ddf.groupby("Pos")])
         ddf["Value"] = ddf["Points"] - ddf["Expected"]
 
-        fig = px.scatter(ddf, x="Pick", y="Points", color="Team", color_discrete_map=cmap,
-                         hover_data=["Player", "Pos", "Round"], symbol="Pos")
-        fig.add_scatter(x=ddf["Pick"], y=ddf["Expected"], mode="lines", name="Expected for that pick",
-                        line=dict(color="gray", dash="dot"))
+        pos_list = sorted(ddf["Pos"].dropna().unique())
+        pos_pick = st.radio("Position", ["All"] + pos_list, horizontal=True)
+        view = ddf if pos_pick == "All" else ddf[ddf["Pos"] == pos_pick]
+        fig = px.scatter(view, x="Pick", y="Points", color="Team", color_discrete_map=cmap,
+                         hover_data=["Player", "Pos", "Round", "Value"], symbol="Pos")
+        if pos_pick != "All":
+            line = view.sort_values("Pick")
+            fig.add_scatter(x=line["Pick"], y=line["Expected"], mode="lines", name=f"Typical {pos_pick} at that pick",
+                            line=dict(color="gray", dash="dot"))
         fig.update_layout(title="Draft pick vs. fantasy points scored while rostered", yaxis_title="Points")
+        st.caption("Value compares each player with others at his position drafted around the same spot, "
+                   "so late-round QBs aren't measured against running backs.")
         st.plotly_chart(style_fig(fig, 460), width="stretch")
 
         grades = ddf.groupby("Team").agg(Points=("Points", "sum"), Value=("Value", "sum")).reset_index()
         grades = grades.sort_values("Value", ascending=False)
-        c1, c2, c3 = st.columns(3)
+        c1, c2 = st.columns([1, 2])
         with c1:
             st.markdown("**Draft value by team**")
             st.dataframe(grades, hide_index=True, width="stretch",
                          column_config={"Points": st.column_config.NumberColumn(format="%.0f"),
                                         "Value": st.column_config.NumberColumn(format="%+.0f", help="Points above what those draft slots usually produce")})
         with c2:
-            st.markdown("**Best values**")
-            st.dataframe(ddf.sort_values("Value", ascending=False).head(8)[["Player", "Team", "Round", "Value"]],
-                         hide_index=True, width="stretch",
-                         column_config={"Value": st.column_config.NumberColumn(format="%+.0f")})
-        with c3:
-            st.markdown("**Biggest busts**")
-            st.dataframe(ddf.sort_values("Value").head(8)[["Player", "Team", "Round", "Value"]],
-                         hide_index=True, width="stretch",
-                         column_config={"Value": st.column_config.NumberColumn(format="%+.0f")})
+            st.markdown("**Best values and biggest busts by position**")
+            order = ["QB", "RB", "WR", "TE", "K", "DEF"]
+            pos_tabs = ["All"] + [p for p in order if p in pos_list] + [p for p in pos_list if p not in order]
+            value_fmt = {"Value": st.column_config.NumberColumn(format="%+.0f"),
+                         "Points": st.column_config.NumberColumn(format="%.0f")}
+            for ptab, pos in zip(st.tabs(pos_tabs), pos_tabs):
+                with ptab:
+                    sub = ddf if pos == "All" else ddf[ddf["Pos"] == pos]
+                    cols = ["Player", "Team", "Round", "Points", "Value"]
+                    if pos == "All":
+                        cols.insert(1, "Pos")
+                    b1, b2 = st.columns(2)
+                    with b1:
+                        st.markdown("Best values")
+                        st.dataframe(sub.sort_values("Value", ascending=False).head(8)[cols],
+                                     hide_index=True, width="stretch", column_config=value_fmt)
+                    with b2:
+                        st.markdown("Biggest busts")
+                        st.dataframe(sub.sort_values("Value").head(8)[cols],
+                                     hide_index=True, width="stretch", column_config=value_fmt)
 
 # ---------------------------------------------------------------------------
 # Playoff odds
