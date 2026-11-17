@@ -773,18 +773,52 @@ with tabs[6]:
         ddf["Value"] = ddf["Points"] - ddf["Expected"]
 
         pos_list = sorted(ddf["Pos"].dropna().unique())
-        pos_pick = st.radio("Position", ["All"] + pos_list, horizontal=True)
+        POS_COLORS = {"QB": "#e76f51", "RB": "#2a9d8f", "WR": "#e9c46a", "TE": "#8ab17d",
+                      "K": "#9b8ec4", "DEF": "#6fa8dc"}
+        f1, f2 = st.columns(2)
+        pos_pick = f1.radio("Position", ["All"] + pos_list, horizontal=True)
+        team_pick = f2.selectbox("Highlight a team", ["All teams"] + sorted(labels.values()))
         view = ddf if pos_pick == "All" else ddf[ddf["Pos"] == pos_pick]
-        fig = px.scatter(view, x="Pick", y="Points", color="Team", color_discrete_map=cmap,
-                         hover_data=["Player", "Pos", "Round", "Value"], symbol="Pos")
-        if pos_pick != "All":
-            line = view.sort_values("Pick")
-            fig.add_scatter(x=line["Pick"], y=line["Expected"], mode="lines", name=f"Typical {pos_pick} at that pick",
-                            line=dict(color="gray", dash="dot"))
-        fig.update_layout(title="Draft pick vs. fantasy points scored while rostered", yaxis_title="Points")
-        st.caption("Value compares each player with others at his position drafted around the same spot, "
-                   "so late-round QBs aren't measured against running backs.")
-        st.plotly_chart(style_fig(fig, 460), width="stretch")
+
+        fig = go.Figure()
+        top = max(view["Value"].max(), 10) * 1.2
+        bottom = min(view["Value"].min(), -10) * 1.2
+        fig.add_hrect(y0=0, y1=top, fillcolor="#2a9d8f", opacity=0.08, line_width=0)
+        fig.add_hrect(y0=bottom, y1=0, fillcolor="#e76f51", opacity=0.08, line_width=0)
+        fig.add_hline(y=0, line_color="gray", line_width=1)
+        fig.add_annotation(x=0.01, y=0.98, xref="paper", yref="paper", text="▲ Steals", showarrow=False,
+                           xanchor="left", font=dict(color="#2a9d8f", size=13))
+        fig.add_annotation(x=0.01, y=0.02, xref="paper", yref="paper", text="▼ Busts", showarrow=False,
+                           xanchor="left", yanchor="bottom", font=dict(color="#e76f51", size=13))
+        for pos in [p for p in ["QB", "RB", "WR", "TE", "K", "DEF"] if p in set(view["Pos"])] + \
+                   [p for p in view["Pos"].unique() if p not in POS_COLORS]:
+            d = view[view["Pos"] == pos]
+            on = (d["Team"] == team_pick).values if team_pick != "All teams" else np.ones(len(d), bool)
+            fig.add_scatter(
+                x=d["Pick"], y=d["Value"], mode="markers", name=pos,
+                marker=dict(color=POS_COLORS.get(pos, "#aaaaaa"), size=np.where(on, 11, 7),
+                            opacity=np.where(on, 0.95, 0.15), line=dict(color="white", width=np.where(on, 1, 0))),
+                customdata=d[["Player", "Team", "Round", "Points", "Expected"]].values,
+                hovertemplate="<b>%{customdata[0]}</b> (" + pos + ")<br>%{customdata[1]}, round %{customdata[2]}"
+                              "<br>%{customdata[3]:.0f} pts vs. %{customdata[4]:.0f} typical"
+                              "<br>Value: %{y:+.0f}<extra></extra>")
+        # name the biggest steals and busts so the chart tells its own story
+        pool = view if team_pick == "All teams" else view[view["Team"] == team_pick]
+        n_lab = 4 if team_pick == "All teams" else 3
+        for _, r in pd.concat([pool.nlargest(n_lab, "Value"), pool.nsmallest(n_lab, "Value")]).iterrows():
+            if abs(r["Value"]) < 5:
+                continue
+            fig.add_annotation(x=r["Pick"], y=r["Value"], text=r["Player"], showarrow=True, arrowhead=0,
+                               arrowcolor="gray", ax=0, ay=-22 if r["Value"] > 0 else 22, font=dict(size=11))
+        rounds = int(ddf["Round"].max() or 1)
+        per_round = max(1, round(len(ddf) / rounds))
+        fig.update_xaxes(title="Draft round", tickvals=[per_round * (r - 1) + per_round / 2 + 0.5 for r in range(1, rounds + 1)],
+                         ticktext=[str(r) for r in range(1, rounds + 1)], showgrid=False)
+        fig.update_yaxes(title="Points vs. typical for that pick", range=[bottom, top], zeroline=False)
+        fig.update_layout(title="Draft steals and busts")
+        st.caption("Each dot is a draft pick, colored by position. Above the line, the player scored more than "
+                   "players at his position usually do from that draft spot; below it, less. Hover over any dot for details.")
+        st.plotly_chart(style_fig(fig, 480), width="stretch")
 
         grades = ddf.groupby("Team").agg(Points=("Points", "sum"), Value=("Value", "sum")).reset_index()
         grades = grades.sort_values("Value", ascending=False)
