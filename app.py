@@ -32,6 +32,8 @@ SLOT_ELIGIBILITY = {
     "IDP_FLEX": {"DL", "DE", "DT", "LB", "DB", "CB", "S"},
 }
 NON_STARTER_SLOTS = {"BN", "IR", "TAXI"}
+# positions left out of position-based charts and tables (add more here if needed)
+HIDE_POSITIONS = {"DB"}
 PALETTE = px.colors.qualitative.Bold + px.colors.qualitative.Safe + px.colors.qualitative.Vivid
 
 st.set_page_config(page_title="League Dashboard", page_icon="🏈", layout="wide")
@@ -590,7 +592,7 @@ with tabs[3]:
 
     if not starters.empty:
         share = st.radio("Positional scoring", ["Total points", "Share of team points"], horizontal=True)
-        pos = starters.groupby(["team", "pos"])["points"].sum().reset_index()
+        pos = starters[~starters["pos"].isin(HIDE_POSITIONS)].groupby(["team", "pos"])["points"].sum().reset_index()
         if share == "Share of team points":
             pos["points"] = pos["points"] / pos.groupby("team")["points"].transform("sum")
         fig = px.bar(pos, x="team", y="points", color="pos", category_orders={"team": order},
@@ -771,6 +773,7 @@ with tabs[6]:
 
         ddf["Expected"] = pd.concat([fit_expected(g) for _, g in ddf.groupby("Pos")])
         ddf["Value"] = ddf["Points"] - ddf["Expected"]
+        ddf = ddf[~ddf["Pos"].isin(HIDE_POSITIONS)]
 
         pos_list = sorted(ddf["Pos"].dropna().unique())
         POS_COLORS = {"QB": "#e76f51", "RB": "#2a9d8f", "WR": "#e9c46a", "TE": "#8ab17d",
